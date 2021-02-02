@@ -1,7 +1,19 @@
 use anyhow::{Context as ah_Context, Result};
-use std::str::FromStr;
+use std::{convert::TryFrom, env, str::FromStr};
 
-use tss_esapi::{constants::algorithm::AsymmetricAlgorithm, Context, Tcti};
+use tss_esapi::{
+    constants::{
+        algorithm::{AsymmetricAlgorithm, Cipher, HashingAlgorithm},
+        tags::PropertyTag,
+        types::session::SessionType,
+    },
+    handles::{AuthHandle, NvIndexHandle, NvIndexTpmHandle},
+    interface_types::resource_handles::NvAuth,
+    nv::storage::{NvIndexAttributes, NvPublicBuilder},
+    structures::MaxNvBuffer,
+    utils::TpmaSessionBuilder,
+    Context, Tcti,
+};
 
 use openssl::{
     asn1::{Asn1Integer, Asn1Time},
@@ -12,7 +24,7 @@ use openssl::{
     x509::{X509NameBuilder, X509NameRef, X509},
 };
 
-fn get_ek_pubkey() -> Result<Rsa<Public>> {
+fn get_ek_pubkey() -> Result<(Rsa<Public>, Context)> {
     let tcti = Tcti::from_str("tabrmd:").context("Error building tcti")?;
     let mut ctx = unsafe { Context::new(tcti) }.context("Error initiating context")?;
 
@@ -34,7 +46,9 @@ fn get_ek_pubkey() -> Result<Rsa<Public>> {
     modulus.resize(pubkey_size as usize, 254);
     let modulus = BigNum::from_slice(&modulus).context("Error building modulus bignum")?;
 
-    Rsa::from_public_components(modulus, exponent).context("Error building pubkey")
+    let pubkey = Rsa::from_public_components(modulus, exponent).context("Error building pubkey")?;
+
+    Ok((pubkey, ctx))
 }
 
 fn generate_ca_key() -> Result<Rsa<Private>> {
@@ -88,8 +102,78 @@ where
     Ok(cert.build())
 }
 
+fn write_full(ctx: &mut Context, index_handle: NvIndexHandle, data: &[u8]) -> Result<()> {
+    let maxsize = ctx
+        .get_tpm_property(PropertyTag::NvBufferMax)?
+        .unwrap_or(512) as usize;
+
+    let datalen = data.len() as usize;
+
+    for offset in (0..datalen).step_by(maxsize) {
+        let size = std::cmp::min(maxsize, datalen) as usize;
+
+        let mut buf = Vec::with_capacity(maxsize);
+        buf.extend_from_slice(&data[offset..size]);
+        let buf =
+            MaxNvBuffer::try_from(buf).context("Error building maxnvbuffer from data part")?;
+
+        ctx.nv_write(AuthHandle::Owner, index_handle, &buf, offset as u16)
+            .context("Error writing part of NV buffer")?;
+    }
+
+    Ok(())
+}
+
+//const RSA_2048_NV_INDEX: u32 = 0x01c00002;
+const RSA_2048_NV_INDEX: u32 = 0x01500003;
+fn insert_ek_cert_into_tpm(ctx: &mut Context, pubcert: &[u8]) -> Result<()> {
+    let session = ctx
+        .start_auth_session(
+            None,
+            None,
+            None,
+            SessionType::Hmac,
+            Cipher::aes_128_cfb(),
+            HashingAlgorithm::Sha256,
+        )
+        .context("Error starting new session")?;
+    let session_attr = TpmaSessionBuilder::new().build();
+    ctx.tr_sess_set_attributes(session.unwrap(), session_attr)
+        .context("Error setting session attributes")?;
+
+    // Create owner nv public.
+    let mut idx_attrs = NvIndexAttributes(0);
+    idx_attrs.set_owner_write(true);
+    idx_attrs.set_owner_read(true);
+
+    let nv_pub = NvPublicBuilder::new()
+        .with_nv_index(
+            NvIndexTpmHandle::new(RSA_2048_NV_INDEX)
+                .context("Error building nv index tpm handle")?,
+        )
+        .with_index_name_algorithm(HashingAlgorithm::Sha256)
+        .with_index_attributes(idx_attrs)
+        .with_data_area_size(pubcert.len())
+        .build()
+        .unwrap();
+
+    ctx.execute_with_session(session, |ctx| {
+        let idxhandle = ctx
+            .nv_define_space(NvAuth::Platform, None, &nv_pub)
+            .context("Error defining NV space")?;
+
+        write_full(ctx, idxhandle, pubcert).context("Error writing contents to NV Index")
+    })
+    .context("Error executing TPM write commands")
+}
+
 fn main() -> Result<()> {
-    let ek_pubkey = get_ek_pubkey().context("Error getting EK pubkey")?;
+    let mut args = env::args();
+    // Ignore first argument (that's our name)
+    args.next();
+
+    // Get data
+    let (ek_pubkey, ctx) = get_ek_pubkey().context("Error getting EK pubkey")?;
     let ek_pubkey = PKey::from_rsa(ek_pubkey).context("Error building pkey from ek pubkey")?;
     let ek_pubkey = ek_pubkey.as_ref();
     let ca_privkey = generate_ca_key().context("Error generating CA key")?;
@@ -151,14 +235,23 @@ fn main() -> Result<()> {
         .context("Error building Asn1Integer")?,
     )
     .context("Error building CA Certificate")?;
-    let ek_cert = ek_cert.to_pem().context("Error building PEM of ek_cert")?;
-    let ek_cert = String::from_utf8(ek_cert).context("Error parsing ek_cert as utf8")?;
+    let ek_cert_pem = ek_cert.to_pem().context("Error building PEM of ek_cert")?;
+    let ek_cert_pem = String::from_utf8(ek_cert_pem).context("Error parsing ek_cert as utf8")?;
+    let ek_cert_der = ek_cert.to_der().context("Error building DER of ek_cert")?;
 
     println!("CA cert: ");
     println!("{}", ca_cert);
 
     println!("EK cert: ");
-    println!("{}", ek_cert);
+    println!("{}", &ek_cert_pem);
+
+    if let Some(arg) = args.next() {
+        if arg == "insert_into_tpm" {
+            let mut ctx = ctx;
+            insert_ek_cert_into_tpm(&mut ctx, &ek_cert_der)
+                .context("Error inserting EK cert into TPM")?;
+        }
+    }
 
     Ok(())
 }
