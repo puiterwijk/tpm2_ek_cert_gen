@@ -1,6 +1,6 @@
 [package]
 name = "tpm2_ek_cert_gen"
-version = "0.1.0"
+version = "0.1.1"
 description = "Tool to create TPM2 EK certificate if the vendor didn't ship one"
 license = "MIT"
 repository = "https://github.com/puiterwijk/tpm2_ek_cert_gen"

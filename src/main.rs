@@ -124,8 +124,7 @@ fn write_full(ctx: &mut Context, index_handle: NvIndexHandle, data: &[u8]) -> Re
     Ok(())
 }
 
-//const RSA_2048_NV_INDEX: u32 = 0x01c00002;
-const RSA_2048_NV_INDEX: u32 = 0x01500003;
+const RSA_2048_NV_INDEX: u32 = 0x01c00002;
 fn insert_ek_cert_into_tpm(ctx: &mut Context, pubcert: &[u8]) -> Result<()> {
     let session = ctx
         .start_auth_session(
