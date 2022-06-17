@@ -10,4 +10,4 @@ edition = "2018"
 [dependencies]
 anyhow = "1.0.38"
 openssl = "0.10.32"
-tss-esapi = "4.0.10-alpha.2"
+tss-esapi = "6.1.2"
