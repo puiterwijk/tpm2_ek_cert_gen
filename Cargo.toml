@@ -9,5 +9,5 @@ edition = "2018"
 
 [dependencies]
 anyhow = "1.0.38"
-openssl = "0.10.32"
+openssl = "0.10.55"
 tss-esapi = "4.0.10-alpha.2"
